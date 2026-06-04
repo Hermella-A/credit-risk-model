@@ -1,26 +1,91 @@
 # Credit Risk Model – Bati Bank & eCommerce Partner
 
-## Credit Scoring Business Understanding
+[![CI](https://github.com/Hermella-A/credit-risk-model/actions/workflows/ci.yml/badge.svg)](https://github.com/Hermella-A/credit-risk-model/actions/workflows/ci.yml)
 
-### 1. How does the Basel II Accord's emphasis on risk measurement influence the need for an interpretable and well-documented model?
+## Project Overview
 
-Basel II requires that banks have robust internal risk measurement systems. In credit scoring, this means the model must be **interpretable** (regulators and auditors need to understand why a customer is classified as high‑risk) and **well‑documented** (every step – data sources, feature engineering, assumptions, model choice – must be recorded). A black‑box model would not comply because it would be impossible to validate or challenge its decisions. Hence, our model must balance performance with transparency, and we must maintain a full audit trail.
+This project builds an end-to-end credit risk scoring model for Bati Bank's buy-now-pay-later service. Using transaction data from an eCommerce partner (no historical default labels), we:
 
-### 2. Without a direct "default" label, why is a proxy variable necessary, and what business risks does proxy‑based prediction introduce?
+- Engineered a proxy target variable via RFM clustering.
+- Built customer-level features (Recency, Frequency, Monetary, refund ratios, product category proportions).
+- Trained and compared Logistic Regression, Random Forest, and XGBoost models.
+- Tracked experiments with MLflow and registered the best model.
+- Deployed the model as a FastAPI REST API, containerized with Docker.
+- Set up CI/CD (linting + tests) with GitHub Actions.
 
-The raw data contains transaction records but no historical loan repayment information (default). Therefore we cannot directly train a supervised model. A **proxy variable** (e.g., a "bad customer" label derived from behavioural patterns like failed transactions, high refund rates, or RFM‑based segmentation) is needed as a substitute for default. The business risks include:
-- **Proxy bias**: The proxy may not perfectly represent true default risk, leading to misclassification.
-- **Regulatory scrutiny**: Using a proxy requires justification; if the proxy is poorly chosen, the model may be rejected by auditors.
-- **Operational risk**: Approving or denying credit based on a flawed proxy could cause financial loss or customer churn.
+**Best model:** XGBoost (ROC-AUC ≈ 0.85) – registered in MLflow as `CreditRiskBestModel`.
 
-### 3. What are the key trade‑offs between a simple, interpretable model (e.g., Logistic Regression with WoE) and a high‑performance model (e.g., Gradient Boosting) in a regulated financial context?
+---
 
-| Aspect | Simple (Logistic Regression + WoE) | High‑performance (Gradient Boosting) |
-|--------|-------------------------------------|--------------------------------------|
-| **Interpretability** | Very high – coefficients directly show impact of each feature. | Low – ensemble of trees is a black box. |
-| **Regulatory acceptance** | Higher (easier to explain and document). | Lower – may require additional validation. |
-| **Predictive power** | Lower – may miss non‑linear relationships. | Higher – can capture complex interactions. |
-| **Risk of overfitting** | Lower (less flexible). | Higher – requires careful tuning and validation. |
-| **Development effort** | Lower – fewer hyperparameters. | Higher – more tuning and monitoring needed. |
+## Business Understanding (Basel II, Proxy Risk, Model Trade-offs)
 
-In a regulated setting, the bank may choose a simple model for initial rollout (to satisfy regulators) and later augment it with a gradient boosting model as a challenger, using explainability tools (SHAP/LIME) to interpret the complex model. The final decision depends on the bank’s risk appetite and the regulator’s stance.
+Basel II requires interpretable, well-documented risk models. Since the raw data contains no default flag, we used a **proxy target** derived from customer transaction behaviour (low frequency, low monetary, high recency). Risks include proxy bias and regulatory scrutiny, which we mitigate by transparent documentation and SHAP explanations.
+
+| Aspect | Simple (Logistic Regression) | High‑performance (XGBoost) |
+|--------|------------------------------|----------------------------|
+| Interpretability | Very high | Low (requires SHAP) |
+| Regulatory acceptance | High | Moderate |
+| Predictive power | Moderate | High |
+| Our choice | Baseline | Champion (with SHAP) |
+
+---
+
+## Repository Structure
+credit-risk-model/
+├── .github/workflows/ci.yml # CI/CD pipeline (flake8 + pytest)
+├── data/ # ignored by Git
+│ ├── raw/ # raw transaction data
+│ └── processed/ # customer_features.csv, X_woe.csv
+├── notebooks/
+│ ├── eda.ipynb # exploratory analysis
+│ └── test_rfm_clustering.ipynb # RFM clustering and proxy target
+├── src/
+│ ├── data_processing.py # feature engineering, RFM, WoE/IV
+│ ├── train.py # model training, MLflow, hyperparameter tuning
+│ ├── predict.py # inference helper
+│ └── api/
+│ ├── main.py # FastAPI app
+│ └── pydantic_models.py # request/response schemas
+├── tests/
+│ └── test_data_processing.py # unit tests
+├── models/ # saved models (ignored)
+├── mlruns/ # MLflow experiments (ignored)
+├── Dockerfile
+├── docker-compose.yml
+├── requirements.txt
+├── .gitignore
+└── README.md
+
+## Setup & Run
+```bash
+git clone https://github.com/Hermella-A/credit-risk-model.git
+cd credit-risk-model
+python -m venv venv && source venv/bin/activate  # or venv\Scripts\activate
+pip install -r requirements.txt
+python src/data_processing.py   # feature engineering + WoE/IV
+python src/train.py             # train models, MLflow
+uvicorn src.api.main:app --reload   # API
+docker-compose up --build       # or run with Docker
+pytest tests/                   # tests
+
+Key Results
+Best model: XGBoost (ROC‑AUC 0.85)
+
+Top features: Monetary, Frequency, Recency
+
+Deployment: FastAPI + Docker, CI/CD with GitHub Actions
+
+Git Practices
+Feature branches (task-1…task-5, improve-feature-engineering) merged via Pull Requests.
+
+Conventional commits, CI badge shows passing build.
+
+Limitations & Future Work
+Proxy target may not perfectly reflect true default risk.
+
+Low recall (0.19) – consider threshold tuning or oversampling.
+
+Next: integrate external credit data, monitor model drift.
+
+Author
+Hermella-Amha – GitHub
