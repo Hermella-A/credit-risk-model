@@ -1,196 +1,133 @@
 """
-Feature engineering pipeline for credit risk model.
-Transforms raw transaction data into customer-level features
-and creates a proxy target variable based on refund behavior.
+Feature engineering and proxy target variable creation for credit risk model.
+Uses RFM clustering to label high‑risk customers.
 """
 import pandas as pd
 import numpy as np
-from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
-from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
 from sklearn.impute import SimpleImputer
 
-class CustomerAggregator(BaseEstimator, TransformerMixin):
+def compute_rfm(df, reference_date=None):
     """
-    Aggregates transaction-level data to customer-level features.
-    Computes RFM-like metrics and refund-related features.
+    Compute Recency, Frequency, Monetary for each customer.
     """
-    def __init__(self, reference_date=None):
-        self.reference_date = reference_date
+    df = df.copy()
+    df['TransactionStartTime'] = pd.to_datetime(df['TransactionStartTime'])
+    if reference_date is None:
+        reference_date = df['TransactionStartTime'].max()
+    
+    rfm = df.groupby('CustomerId').agg(
+        recency=('TransactionStartTime', lambda x: (reference_date - x.max()).days),
+        frequency=('TransactionId', 'count'),
+        monetary=('Amount', lambda x: x[x > 0].sum())   # only positive amounts (spending)
+    ).reset_index()
+    
+    # Handle zero monetary values (customers who never spent? but transactions may have negative)
+    # For customers with no positive amount, monetary could be 0; we keep it.
+    return rfm
 
-    def fit(self, X, y=None):
-        return self
-
-    def transform(self, X):
-        # X is the raw transaction DataFrame
-        df = X.copy()
-        
-        # Convert datetime if not already
-        if 'TransactionStartTime' in df.columns:
-            df['TransactionStartTime'] = pd.to_datetime(df['TransactionStartTime'])
-            if self.reference_date is None:
-                self.reference_date = df['TransactionStartTime'].max()
-        
-        # Aggregate per customer
-        customer_df = df.groupby('CustomerId').agg(
-            recency=('TransactionStartTime', lambda x: (self.reference_date - x.max()).days),
-            frequency=('TransactionId', 'count'),
-            monetary=('Amount', lambda x: x[x > 0].sum()),
-            refund_amount=('Amount', lambda x: -x[x < 0].sum()),
-            refund_count=('Amount', lambda x: (x < 0).sum()),
-            avg_amount=('Amount', 'mean'),
-            std_amount=('Amount', 'std')
-        ).reset_index()
-        
-        # Fill NaN std with 0
-        customer_df['std_amount'].fillna(0, inplace=True)
-        
-        # Compute refund ratio
-        customer_df['refund_ratio'] = customer_df['refund_amount'] / (customer_df['monetary'] + 1e-6)
-        
-        # Proxy target: 1 if refund_ratio > 0.2 or refund_count > 3
-        customer_df['risk_proxy'] = ((customer_df['refund_ratio'] > 0.2) | (customer_df['refund_count'] > 3)).astype(int)
-        
-        return customer_df
-
-class DatetimeFeatureExtractor(BaseEstimator, TransformerMixin):
-    """Extracts hour, day, month, year from TransactionStartTime."""
-    def fit(self, X, y=None):
-        return self
-
-    def transform(self, X):
-        # X is the raw transaction DataFrame
-        df = X.copy()
-        if 'TransactionStartTime' in df.columns:
-            df['TransactionStartTime'] = pd.to_datetime(df['TransactionStartTime'])
-            df['hour'] = df['TransactionStartTime'].dt.hour
-            df['day'] = df['TransactionStartTime'].dt.day
-            df['month'] = df['TransactionStartTime'].dt.month
-            df['year'] = df['TransactionStartTime'].dt.year
-        # Keep only the datetime features (we will aggregate later, but we can return them)
-        return df[['CustomerId', 'hour', 'day', 'month', 'year']]
-
-class CategoryAggregator(BaseEstimator, TransformerMixin):
+def assign_risk_cluster(rfm_df, n_clusters=3, random_state=42):
     """
-    Aggregates categorical columns: computes proportions of each category per customer.
+    Scale RFM features, apply KMeans clustering, and return cluster labels.
+    Also returns the cluster centers to identify the high‑risk cluster.
     """
-    def __init__(self, cat_cols):
-        self.cat_cols = cat_cols
-
-    def fit(self, X, y=None):
-        return self
-
-    def transform(self, X):
-        df = X.copy()
-        # For each categorical column, get proportion of each value per customer
-        result = df.groupby('CustomerId')[self.cat_cols[0]].value_counts(normalize=True).unstack(fill_value=0).add_prefix(f"{self.cat_cols[0]}_")
-        for col in self.cat_cols[1:]:
-            temp = df.groupby('CustomerId')[col].value_counts(normalize=True).unstack(fill_value=0).add_prefix(f"{col}_")
-            result = result.join(temp, how='outer')
-        result = result.reset_index()
-        return result
-
-def build_preprocessing_pipeline():
-    """
-    Constructs a full preprocessing pipeline that transforms raw transaction data
-    into a customer-level feature set ready for modeling.
-    """
-    # Step 1: Aggregate customer features (RFM, refund metrics)
-    aggregator = CustomerAggregator()
+    # Select RFM features
+    X = rfm_df[['recency', 'frequency', 'monetary']].copy()
     
-    # Step 2: Extract datetime features (we will aggregate later, but for simplicity we can merge)
-    # For simplicity, we will not include datetime features in the first version.
-    # We'll focus on the aggregated features.
+    # Handle missing values (should be none, but safe)
+    imputer = SimpleImputer(strategy='median')
+    X_imputed = imputer.fit_transform(X)
     
-    # For categorical aggregation, we need to handle many categories; we'll use one-hot encoding later.
-    # Instead of pre-aggregating categories, we'll let the ColumnTransformer handle them after merging.
+    # Scale features
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_imputed)
     
-    # We'll build a custom transformer that merges all needed features.
-    # For simplicity, we'll implement the full processing in a single function that returns a DataFrame.
-    # But to comply with the instruction (use sklearn Pipeline), we'll create a pipeline with custom steps.
+    # KMeans clustering
+    kmeans = KMeans(n_clusters=n_clusters, random_state=random_state, n_init=10)
+    clusters = kmeans.fit_predict(X_scaled)
     
-    # Since the output of aggregator is customer-level, we can then apply scaling and encoding.
-    # However, we need to also incorporate categorical features from transactions (e.g., ProductCategory).
-    # This is complex to do purely with sklearn pipelines. We'll provide a function that uses the custom transformers.
+    # Determine which cluster is the least engaged (high‑risk)
+    # Typically high risk = low frequency, low monetary, high recency (old)
+    # We'll compute mean of each cluster on original scale
+    cluster_summary = rfm_df.copy()
+    cluster_summary['cluster'] = clusters
+    cluster_means = cluster_summary.groupby('cluster')[['recency', 'frequency', 'monetary']].mean()
     
-    # We'll create a pipeline that:
-    # 1. Aggregates customer-level numeric features (RFM, refund)
-    # 2. Aggregates categorical proportions (ProductCategory, ChannelId, PricingStrategy)
-    # 3. Merges them
-    # 4. Scales numerical features
-    # 5. Outputs final DataFrame with proxy target.
+    # High‑risk cluster: highest recency (oldest) and lowest frequency & monetary
+    # We'll simply take the cluster with the lowest frequency (or lowest monetary)
+    high_risk_cluster = cluster_means['frequency'].idxmin()  # cluster with smallest average frequency
+    # Alternative: use a score (e.g., recency* - frequency - monetary) but simple works.
     
-    # For simplicity, we will provide a function `process_data` that performs all steps and returns a cleaned DataFrame.
-    pass
+    return clusters, high_risk_cluster
 
 def process_data(raw_df):
     """
-    Main function to process raw transaction data into model-ready dataset.
-    Returns DataFrame with features and proxy target.
+    Main function: processes raw transaction data, computes RFM, clusters customers,
+    assigns high‑risk label, and returns a model‑ready dataset with features and target.
     """
     df = raw_df.copy()
     
-    # Convert datetime
-    df['TransactionStartTime'] = pd.to_datetime(df['TransactionStartTime'])
-    reference_date = df['TransactionStartTime'].max()
+    # 1. Compute RFM
+    rfm = compute_rfm(df)
     
-    # ---- Customer aggregation (numeric) ----
-    customer_df = df.groupby('CustomerId').agg(
-        recency=('TransactionStartTime', lambda x: (reference_date - x.max()).days),
-        frequency=('TransactionId', 'count'),
-        monetary=('Amount', lambda x: x[x > 0].sum()),
-        refund_amount=('Amount', lambda x: -x[x < 0].sum()),
-        refund_count=('Amount', lambda x: (x < 0).sum()),
-        avg_amount=('Amount', 'mean'),
-        std_amount=('Amount', 'std')
+    # 2. Cluster customers
+    clusters, high_risk_cluster = assign_risk_cluster(rfm)
+    rfm['cluster'] = clusters
+    rfm['is_high_risk'] = (rfm['cluster'] == high_risk_cluster).astype(int)
+    
+    # 3. Build additional features (optional – you can add more)
+    # For example, average transaction amount, refund ratio, etc.
+    # We'll compute some basic aggregations.
+    customer_agg = df.groupby('CustomerId').agg(
+        total_transactions=('TransactionId', 'count'),
+        total_spent=('Amount', lambda x: x[x>0].sum()),
+        total_refund=('Amount', lambda x: -x[x<0].sum()),
+        avg_transaction=('Amount', 'mean'),
+        std_transaction=('Amount', 'std'),
+        unique_categories=('ProductCategory', 'nunique')
     ).reset_index()
-    customer_df['std_amount'].fillna(0, inplace=True)
-    customer_df['refund_ratio'] = customer_df['refund_amount'] / (customer_df['monetary'] + 1e-6)
-    customer_df['risk_proxy'] = ((customer_df['refund_ratio'] > 0.2) | (customer_df['refund_count'] > 3)).astype(int)
     
-    # ---- Categorical aggregation (proportions) ----
-    cat_cols = ['ProductCategory', 'ChannelId', 'PricingStrategy']
-    for cat in cat_cols:
-        # One-hot encode the category per transaction, then aggregate by customer
-        dummies = pd.get_dummies(df[cat], prefix=cat)
-        temp = pd.concat([df['CustomerId'], dummies], axis=1)
-        cat_agg = temp.groupby('CustomerId').mean().reset_index()
-        customer_df = customer_df.merge(cat_agg, on='CustomerId', how='left')
+    # Fill NaN std
+    customer_agg['std_transaction'] = customer_agg['std_transaction'].fillna(0)
     
-    # ---- Datetime features (aggregated) ----
-    # For simplicity, we add the hour of the day (most common hour per customer)
-    df['hour'] = df['TransactionStartTime'].dt.hour
-    hour_mode = df.groupby('CustomerId')['hour'].agg(lambda x: x.mode()[0] if len(x.mode()) > 0 else 0).rename('most_common_hour')
-    customer_df = customer_df.merge(hour_mode, on='CustomerId', how='left')
+    # Compute refund ratio
+    customer_agg['refund_ratio'] = customer_agg['total_refund'] / (customer_agg['total_spent'] + 1e-6)
     
-    # ---- Drop unnecessary columns ----
-    # Keep only features and target
-    # We'll drop CustomerId if we don't need it for modeling
-    feature_cols = [col for col in customer_df.columns if col not in ['CustomerId', 'risk_proxy']]
-    X = customer_df[feature_cols]
-    y = customer_df['risk_proxy']
+    # 4. Merge RFM with other features
+    final_df = rfm.merge(customer_agg, on='CustomerId', how='left')
     
-    # ---- Handle missing values (if any) ----
-    # Impute with median
+    # 5. Drop original RFM components if you want to keep only scaled versions? We'll keep for now.
+    # But we need to scale numerical features before modeling (will be done in training pipeline).
+    # We'll just return the raw features plus target.
+    
+    # Keep only useful columns (excluding CustomerId for modeling)
+    # We'll keep CustomerId for merging but drop later.
+    feature_cols = ['recency', 'frequency', 'monetary', 'total_transactions', 'total_spent',
+                    'total_refund', 'avg_transaction', 'std_transaction', 'unique_categories', 'refund_ratio']
+    
+    X = final_df[['CustomerId'] + feature_cols]
+    y = final_df['is_high_risk']
+    
+    # Handle any remaining missing values
     from sklearn.impute import SimpleImputer
     imputer = SimpleImputer(strategy='median')
-    X_imputed = pd.DataFrame(imputer.fit_transform(X), columns=X.columns)
-    
-    # ---- Scale numerical features ----
-    scaler = StandardScaler()
-    X_scaled = pd.DataFrame(scaler.fit_transform(X_imputed), columns=X_imputed.columns)
+    X_numeric = X[feature_cols]
+    X_imputed = imputer.fit_transform(X_numeric)
+    X_imputed_df = pd.DataFrame(X_imputed, columns=feature_cols)
+    X_imputed_df['CustomerId'] = X['CustomerId'].values
     
     # Combine features and target
-    result = X_scaled.copy()
-    result['risk_proxy'] = y.values
+    result = X_imputed_df
+    result['is_high_risk'] = y.values
     
     return result
 
 if __name__ == "__main__":
     # Example usage
-    raw = pd.read_csv('../data/raw/data.csv')
+    raw = pd.read_csv('data/raw/data.csv')
     processed = process_data(raw)
-    print(processed.head())
-    processed.to_csv('../data/processed/customer_features.csv', index=False)
-    print("Saved processed data to ../data/processed/customer_features.csv")
+    print("Processed data shape:", processed.shape)
+    print("Target distribution:\n", processed['is_high_risk'].value_counts())
+    processed.to_csv('data/processed/customer_features.csv', index=False)
+    print("Saved to ../data/processed/customer_features.csv")
